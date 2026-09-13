@@ -1,4 +1,5 @@
 export const REQUEST_LIMIT = 256 * 1024;
+export function isServerId(value:unknown):value is string {return typeof value==="string"&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);}
 export interface NoteContext { path: string; text: string; original: string; from?: number; to?: number }
 export function normalizeAddress(value: string): string {
   const url = new URL(value.trim());
@@ -8,8 +9,13 @@ export function normalizeAddress(value: string): string {
   return url.origin + "/api/remote/v1";
 }
 export function validateNotePath(value: string): string {
+  validateVaultPath(value);
+  if(!/\.md$/i.test(value))throw new Error("只允许 Vault 内普通 Markdown 笔记路径");
+  return value;
+}
+export function validateVaultPath(value:string):string {
   const segments = value.split("/");
-  if (!value || /[\\:\x00-\x1f]/.test(value) || !/\.md$/i.test(value) || segments.some(segment => !segment || segment.startsWith(".") || /[. ]$/.test(segment) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(segment))) throw new Error("只允许 Vault 内普通 Markdown 笔记路径");
+  if (!value || /[\\:\x00-\x1f]/.test(value) || segments.some(segment => !segment || segment.startsWith(".") || /[. ]$/.test(segment) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(segment))) throw new Error("只允许 Vault 内普通文件路径");
   return value;
 }
 export function buildPrompt(message: string, notes: NoteContext[]): string {

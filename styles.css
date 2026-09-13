@@ -16,3 +16,12 @@
 .piora-added { background:var(--background-modifier-success); }
 .piora-removed { background:var(--background-modifier-error); text-decoration:line-through; }
 .piora-chat button { font-size:var(--font-ui-small); }
+.piora-tool-call { border-inline-start:3px solid var(--text-muted); }
+.piora-tool-call[data-status="running"] { border-inline-start-color:var(--interactive-accent); }
+.piora-tool-call[data-status="failed"] { border-inline-start-color:var(--text-error); }
+.piora-tool-call[data-status="succeeded"] { border-inline-start-color:var(--text-success); }
+.piora-tool-call details { margin-top:8px; }
+.piora-tool-call pre { max-height:240px; overflow:auto; }
+.piora-note-search { display:flex; flex-direction:column; gap:10px; }
+.piora-note-search input { width:100%; }
+.piora-search-results { max-height:55vh; overflow:auto; }

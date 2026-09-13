@@ -1,7 +1,6 @@
 import { createServer } from "node:http";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, cp, symlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, cp, symlink } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -19,52 +18,175 @@ await symlink(join(source,"node_modules"),join(fixtureSource,"node_modules"),pro
 await symlink(join(source,"public"),join(fixtureSource,"public"),process.platform==="win32"?"junction":"dir");
 await mkdir(agentDir,{recursive:true});await mkdir(vault,{recursive:true});
 const requests=[];
+let nextModelGate;let releaseModel;let nextToolRequest=false;let releaseToolReply;
+async function waitUntil(check,message,timeout=30000) {
+  const deadline=Date.now()+timeout;
+  while(Date.now()<deadline){if(await check())return;await new Promise(resolve=>setTimeout(resolve,100));}
+  throw new Error(message);
+}
 const modelServer=createServer(async(request,response)=>{
   let raw="";for await(const chunk of request)raw+=chunk;
   const body=JSON.parse(raw);requests.push(body);
+  const chunks=requests.length===1?["Piora ","fixture ","response."]:requests.length===2?["Queue ","first ","response."]:["Queue ","second ","response."];
+  const gate=nextModelGate;nextModelGate=undefined;if(gate)await gate;
+  if(nextToolRequest){
+    nextToolRequest=false;assert.equal(body.stream,true);assert.ok(body.tools.some(tool=>tool.function.name==="read"));
+    nextModelGate=new Promise(resolve=>{releaseToolReply=resolve;});
+    response.writeHead(200,{"Content-Type":"text/event-stream"});
+    const tool_calls=[{index:0,id:"fixture-read-ok",type:"function",function:{name:"read",arguments:JSON.stringify({path:join(vault,"tool-fixture.md")})}},{index:1,id:"fixture-read-error",type:"function",function:{name:"read",arguments:JSON.stringify({path:join(vault,"missing-fixture.md")})}}];
+    response.write("data: "+JSON.stringify({id:"fixture-tools",object:"chat.completion.chunk",created:1,model:"fixture",choices:[{index:0,delta:{role:"assistant",tool_calls},finish_reason:null}]})+"\n\n");
+    response.end("data: "+JSON.stringify({id:"fixture-tools",object:"chat.completion.chunk",created:1,model:"fixture",choices:[{index:0,delta:{},finish_reason:"tool_calls"}],usage:{prompt_tokens:10,completion_tokens:5,total_tokens:15}})+"\n\ndata: [DONE]\n\n");return;
+  }
   if(body.stream){
     response.writeHead(200,{"Content-Type":"text/event-stream"});
-    for(const content of ["Piora ","fixture ","response."]){response.write("data: "+JSON.stringify({id:"fixture",object:"chat.completion.chunk",created:1,model:"fixture",choices:[{index:0,delta:{role:"assistant",content},finish_reason:null}]})+"\n\n");await new Promise(resolve=>setTimeout(resolve,350));}
+    for(const content of chunks){response.write("data: "+JSON.stringify({id:"fixture",object:"chat.completion.chunk",created:1,model:"fixture",choices:[{index:0,delta:{role:"assistant",content},finish_reason:null}]})+"\n\n");await new Promise(resolve=>setTimeout(resolve,350));}
     response.end("data: "+JSON.stringify({id:"fixture",object:"chat.completion.chunk",created:1,model:"fixture",choices:[{index:0,delta:{},finish_reason:"stop"}],usage:{prompt_tokens:10,completion_tokens:5,total_tokens:15}})+"\n\ndata: [DONE]\n\n");
-  } else {response.setHeader("Content-Type","application/json");response.end(JSON.stringify({id:"fixture",object:"chat.completion",created:1,model:"fixture",choices:[{index:0,message:{role:"assistant",content:"Piora fixture response."},finish_reason:"stop"}],usage:{prompt_tokens:10,completion_tokens:5,total_tokens:15}}));}
+  } else {response.setHeader("Content-Type","application/json");response.end(JSON.stringify({id:"fixture",object:"chat.completion",created:1,model:"fixture",choices:[{index:0,message:{role:"assistant",content:chunks.join("")},finish_reason:"stop"}],usage:{prompt_tokens:10,completion_tokens:5,total_tokens:15}}));}
 });
 await new Promise(resolve=>modelServer.listen(0,"127.0.0.1",resolve));
 const modelPort=modelServer.address().port;
-await writeFile(join(agentDir,"models.json"),JSON.stringify({providers:{"piora-fixture":{baseUrl:"http://127.0.0.1:"+modelPort+"/v1",api:"openai-completions",apiKey:"fixture-only",models:[{id:"fixture",name:"Fixture",reasoning:false,input:["text"],contextWindow:8192,maxTokens:512,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}}}));
+const fixtureModel={id:"fixture",name:"Fixture",reasoning:false,input:["text"],contextWindow:8192,maxTokens:512,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}};
+await writeFile(join(agentDir,"models.json"),JSON.stringify({providers:{"piora-fixture":{baseUrl:"http://127.0.0.1:"+modelPort+"/v1",api:"openai-completions",apiKey:"fixture-only",models:[fixtureModel,{...fixtureModel,id:"fixture-vision",name:"Fixture vision",input:["text","image"]}]}}}));
 await writeFile(join(agentDir,"settings.json"),JSON.stringify({defaultProvider:"piora-fixture",defaultModel:"fixture"}));
-const environment={...process.env,PI_CODING_AGENT_DIR:agentDir,PIORA_REMOTE_CONTROL_ROOT:join(root,"remote"),PIORA_RUNTIME_PROFILE:"normal",PI_DESKTOP_TOKEN:"",PI_WEB_PASSWORD:"",NEXT_TELEMETRY_DISABLED:"1"};
+const environment={...process.env,PI_CODING_AGENT_DIR:agentDir,PIORA_REMOTE_CONTROL_ROOT:join(root,"remote"),PIORA_DISCOVERY_DIR:join(root,"discovery"),PIORA_DISCOVERY_DISABLED:"0",PIORA_RUNTIME_PROFILE:"normal",PI_DESKTOP_TOKEN:"d".repeat(64),PI_WEB_PASSWORD:"",NEXT_TELEMETRY_DISABLED:"1"};
 Object.assign(process.env,{PI_CODING_AGENT_DIR:agentDir,PIORA_REMOTE_CONTROL_ROOT:environment.PIORA_REMOTE_CONTROL_ROOT,PIORA_RUNTIME_PROFILE:"normal"});
 const requirePiora=createRequire(join(source,"package.json"));const {createJiti}=requirePiora("jiti");
 const store=await createJiti(import.meta.url).import(join(source,"lib/remote-control-store.ts"));
-const {token,record}=await store.createRemoteCapabilityToken({name:"Isolated HTTP integration",scopes:["capabilities.read","session.create","session.state.read","session.history.read","session.tools.read","session.message.send","session.events.read","session.messages.read","session.abort"]});
+const {token,record}=await store.createRemoteCapabilityToken({name:"Isolated HTTP integration",creationPolicy:{allowedPolicies:["notes"],cwdRoots:[vault]},scopes:["capabilities.read","session.create","session.state.read","session.history.read","session.tools.read","session.message.send","session.events.read","session.messages.read","session.abort"]});
 await mkdir(".local",{recursive:true});
 await build({entryPoints:["src/client.ts"],outfile:".local/integration-client.mjs",platform:"node",format:"esm",bundle:true});
+await build({entryPoints:["src/session.ts"],outfile:".local/integration-session.mjs",platform:"node",format:"esm",bundle:true});
+await build({entryPoints:["src/attachments.ts"],outfile:".local/integration-attachments.mjs",platform:"node",format:"esm",bundle:true});
+await build({entryPoints:["src/discovery.ts"],outfile:".local/integration-discovery.mjs",platform:"node",format:"esm",bundle:true});
 const {RemoteClient}=await import(pathToFileURL(resolve(".local/integration-client.mjs")).href);
+const {SessionController}=await import(pathToFileURL(resolve(".local/integration-session.mjs")).href);
+const {prepareAttachment,attachmentPayload}=await import(pathToFileURL(resolve(".local/integration-attachments.mjs")).href);
+const {discoverLocalServices}=await import(pathToFileURL(resolve(".local/integration-discovery.mjs")).href);
 const port=30142;
 const child=spawn(process.execPath,[requirePiora.resolve("next/dist/bin/next"),"dev","--webpack","-H","127.0.0.1","-p",String(port)],{cwd:fixtureSource,env:environment,windowsHide:true,stdio:["ignore","pipe","pipe"]});
 let logs="";child.stdout.on("data",chunk=>{logs=(logs+chunk).slice(-12000);});child.stderr.on("data",chunk=>{logs=(logs+chunk).slice(-12000);});
 const client=new RemoteClient("http://127.0.0.1:"+port,()=>token);const abort=new AbortController();
+let queueController;let toolController;let mediaController;
 try {
   let capabilities;
-  for(let attempt=0;attempt<90;attempt++){try{capabilities=await client.request("/capabilities");break;}catch{if(child.exitCode!==null)throw new Error("Dev server exited: "+logs);await new Promise(resolve=>setTimeout(resolve,1000));}}
+  for(let attempt=0;attempt<90;attempt++){try{client.pinServer(await client.identify());capabilities=await client.request("/capabilities");break;}catch{if(child.exitCode!==null)throw new Error("Dev server exited: "+logs);await new Promise(resolve=>setTimeout(resolve,1000));}}
   assert.equal(capabilities?.features?.contentStream,true,logs);
+  assert.equal(capabilities.features.toolLifecycle,"tool-calls-v1");
+  assert.equal(capabilities.features.messageImages,"base64-images-v1");
+  let discoveryResult;await waitUntil(async()=>{discoveryResult=await discoverLocalServices({root:environment.PIORA_DISCOVERY_DIR});return discoveryResult.services.length===1;},"Started Piora did not publish a verifiable local registration",15000);
+  assert.equal(discoveryResult.services[0].address,"http://127.0.0.1:"+port+"/api/remote/v1");assert.equal(discoveryResult.services[0].serverId,capabilities.serverId);assert.equal(discoveryResult.skipped,0);
+  assert.equal((await fetch("http://127.0.0.1:"+port+"/api/health")).status,403,"The synthetic Desktop Token boundary must remain active outside Remote API");
+  const identityResponse=await fetch("http://127.0.0.1:"+port+"/api/remote/v1/identity");assert.equal(identityResponse.status,200);
+  const identity=await identityResponse.json();assert.deepEqual(Object.keys(identity).sort(),["protocol","serverId"]);assert.equal(identity.serverId,capabilities.serverId);
+  const anotherProcess=spawnSync(process.execPath,["-e",'require("jiti").createJiti(process.cwd()+"/identity-check.cjs").import("./lib/remote-control-store.ts").then(async store=>console.log(await store.getRemoteServerId()))'],{cwd:fixtureSource,env:environment,encoding:"utf8",windowsHide:true});
+  assert.equal(anotherProcess.status,0,anotherProcess.stderr);assert.equal(anotherProcess.stdout.trim(),identity.serverId,"A new process changed the persisted identity");
+  const mismatched=await fetch("http://127.0.0.1:"+port+"/api/remote/v1/capabilities",{headers:{Authorization:"Bearer "+token,"X-Piora-Server-Id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"}});assert.equal(mismatched.status,409);
+  assert.deepEqual(capabilities.sessionCreation.allowedPolicies,["notes"]);
+  assert.deepEqual(capabilities.sessionCreation.cwdRoots,[await realpath(vault)]);
+  assert.equal(capabilities.sessionCreation.legacyUnrestricted,false);
+  const sessionsBefore=await client.request("/sessions");
+  await assert.rejects(client.request("/sessions",{body:{cwd:vault,policy:"agent"},key:"denied-agent"}),error=>error.status===403);
+  await assert.rejects(client.request("/sessions",{body:{cwd:agentDir,policy:"notes"},key:"denied-directory"}),error=>error.status===403);
+  const noRoots=await store.createRemoteCapabilityToken({name:"Default deny fixture",scopes:["session.create"]});
+  const noRootsClient=new RemoteClient("http://127.0.0.1:"+port,()=>noRoots.token);
+  await assert.rejects(noRootsClient.request("/sessions",{body:{cwd:vault,policy:"notes"},key:"denied-default"}),error=>error.status===403);
+  assert.deepEqual(await client.request("/sessions"),sessionsBefore);assert.equal(requests.length,0);
   const catalog=await client.request("/models");assert.ok(catalog.models.some(model=>model.provider==="piora-fixture"&&model.id==="fixture"),"Configured model missing from remote catalog");
   const created=await client.request("/sessions",{body:{cwd:vault,policy:"notes",provider:"piora-fixture",modelId:"fixture",name:"HTTP fixture"},key:"create-fixture"});
-  const replay=await client.request("/sessions",{body:{cwd:vault,policy:"notes"},key:"create-fixture"});assert.equal(replay.sessionId,created.sessionId);
+  await assert.rejects(client.request("/sessions",{body:{cwd:vault,policy:"notes"},key:"create-fixture"}),error=>error.status===409&&error.code==="REMOTE_CREATION_CONFLICT");
+  const replay=await client.request("/sessions",{body:{cwd:vault,policy:"notes",provider:"piora-fixture",modelId:"fixture",name:"HTTP fixture"},key:"create-fixture"});assert.equal(replay.sessionId,created.sessionId);
+  const intentDirectory=join(environment.PIORA_REMOTE_CONTROL_ROOT,"session-creations");
+  const intentFiles=(await readdir(intentDirectory)).filter(name=>name.endsWith(".json"));assert.equal(intentFiles.length,1);
+  const intent=JSON.parse(await readFile(join(intentDirectory,intentFiles[0]),"utf8"));assert.equal(intent.sessionId,created.sessionId);assert.equal(intent.phase,"ready");
   const base="/sessions/"+created.sessionId;
   const tools=await client.request(base+"/tools");assert.deepEqual(tools.activeToolNames,[]);
   const snapshots=[];const streaming=client.stream(base+"/content-events",event=>snapshots.push(event),abort.signal);
+  const lifecycle=[];const lifecycleStreaming=client.stream(base+"/events",event=>lifecycle.push(event),abort.signal);
+  await waitUntil(()=>lifecycle.some(event=>event.type==="snapshot"),"Missing initial lifecycle snapshot");
   const receipt=await client.request(base+"/messages",{body:{content:"Summarize this synthetic fixture. Do not access files."},key:"message-fixture"});assert.ok(receipt.commandId);
   let history;
   for(let attempt=0;attempt<60;attempt++){history=await client.request(base+"/history");if(history.messages.some(message=>message.role==="assistant"&&JSON.stringify(message.content).includes("Piora fixture response.")))break;await new Promise(resolve=>setTimeout(resolve,1000));}
   assert.ok(history.messages.some(message=>message.role==="assistant"&&JSON.stringify(message.content).includes("Piora fixture response.")),"Missing assistant result; server tail: "+logs);
   assert.equal(history.remotePolicy,"notes");assert.equal(requests.length,1);assert.ok(requests.every(request=>!request.tools?.length));
   assert.ok(snapshots.some(event=>typeof event.text==="string"&&event.text.includes("Piora")),"No live content observed");
+  assert.equal(capabilities.features.commandCancellation,true);
+  assert.equal(capabilities.features.contentStreamIdentity,"run-sequence-v1");
+  const liveFrames=[];const observeQueue=()=>{const state=queueController?.state;if(state?.live)liveFrames.push({runId:state.control.activeRunId,text:state.live});};
+  const journal=new Map();const journalPath=join(root,"task-receipts.json");
+  const saveTask=async(task,key)=>{if(task)journal.set(task.key,task);else journal.delete(key);await writeFile(journalPath,JSON.stringify([...journal.values()]));};
+  assert.equal(capabilities.authentication.capabilityId,record.id);
+  const creationPath=join(root,"creation-receipt.json");const saveCreation=async receipt=>{await writeFile(creationPath,JSON.stringify(receipt));};
+  let dropCreationReply=true;
+  const faultyCreationClient={stream:client.stream.bind(client),request:async(path,options)=>{
+    if(path==="/sessions"&&options?.body){const saved=JSON.parse(await readFile(creationPath,"utf8"));assert.equal(saved.key,options.key);assert.equal(saved.capabilityId,options.capabilityId);assert.deepEqual(saved.input,options.body);}
+    const result=await client.request(path,options);if(path==="/sessions"&&options?.body&&dropCreationReply){dropCreationReply=false;throw new Error("Fixture dropped creation acknowledgement");}return result;
+  }};
+  queueController=new SessionController(faultyCreationClient,observeQueue,saveTask,saveCreation);await queueController.connect();
+  await assert.rejects(queueController.create({cwd:vault,policy:"notes",provider:"piora-fixture",modelId:"fixture",name:"Queue fixture"}),/dropped creation acknowledgement/);
+  const creationCheckpoint=JSON.parse(await readFile(creationPath,"utf8"));assert.ok(!creationCheckpoint.sessionId);assert.equal(creationCheckpoint.capabilityId,record.id);
+  const originalCreatedSession=store.findRemoteSessionCreation(record.id,creationCheckpoint.key);assert.ok(originalCreatedSession);
+  const otherCreator=await store.createRemoteCapabilityToken({name:"Changed creation capability fixture",scopes:["session.create"],creationPolicy:{allowedPolicies:["notes"],cwdRoots:[vault]}});
+  const otherCreatorClient=new RemoteClient("http://127.0.0.1:"+port,()=>otherCreator.token);
+  await assert.rejects(otherCreatorClient.request("/sessions",{body:creationCheckpoint.input,key:creationCheckpoint.key,capabilityId:creationCheckpoint.capabilityId}),error=>error.status===409);
+  queueController.disconnect();queueController=new SessionController(client,observeQueue,saveTask,saveCreation);await queueController.connect();queueController.restoreCreation(creationCheckpoint);
+  const queuedSession=await queueController.retryCreation();assert.equal(queuedSession,originalCreatedSession);assert.equal((await client.request("/sessions")).sessions.length,2,"Creation recovery duplicated a session");
+  assert.equal(JSON.parse(await readFile(creationPath,"utf8")).sessionId,queuedSession);
+  await writeFile(join(root,"selected-session.json"),JSON.stringify({serverId:identity.serverId,sessionId:queuedSession}));await queueController.clearCreation();assert.equal(JSON.parse(await readFile(creationPath,"utf8")),null);
+  nextModelGate=new Promise(resolve=>{releaseModel=resolve;});
+  await queueController.send("First synthetic queued task.");await waitUntil(()=>requests.length===2,"First queued task did not reach the synthetic model");
+  await queueController.enqueue("Second synthetic queued task.");await queueController.enqueue("Cancelled synthetic task must never reach the model.");
+  assert.equal(queueController.state.tasks.length,3);assert.equal(journal.size,3);const cancelled=queueController.state.tasks[2].commandId;
+  const limited=await store.createRemoteCapabilityToken({name:"Restricted cancellation fixture",scopes:["session.abort"],allowedSessionIds:[created.sessionId]});
+  const limitedClient=new RemoteClient("http://127.0.0.1:"+port,()=>limited.token);
+  await assert.rejects(limitedClient.request("/commands/"+cancelled+"/cancel",{body:{}}),error=>error.status===403);
+  await queueController.cancel(cancelled);await queueController.cancel(cancelled);
+  queueController.disconnect();const restored=JSON.parse(await readFile(journalPath,"utf8"));assert.ok(restored.length>=2);
+  assert.ok(!JSON.stringify(restored).includes("synthetic"),"Recovery metadata must not contain prompts");
+  queueController=new SessionController(client,observeQueue,saveTask);await queueController.connect();for(const task of restored)queueController.restoreTask(task);await queueController.select(queuedSession);
+  assert.equal(queueController.state.tasks.length,2,"Restored controller lost active/queued receipts or retained the cancelled command");
+  releaseModel();releaseModel=undefined;
+  await waitUntil(()=>queueController.state.tasks.length===0,"Queued task receipts did not reach terminal states",45000);
+  assert.equal(requests.length,3,"Cancelled or restored messages caused extra model invocations");
+  await waitUntil(()=>queueController.state.history.messages.filter(message=>message.role==="assistant").length===2,"Queued task history did not reconcile",15000);
+  assert.ok(!JSON.stringify(queueController.state.history).includes("Cancelled synthetic task"));assert.equal(journal.size,0);
+  const firstFrame=liveFrames.find(frame=>frame.text.includes("Queue first"));const secondFrame=liveFrames.find(frame=>frame.text.includes("Queue second"));
+  assert.ok(firstFrame?.runId&&secondFrame?.runId,"Both queued runs must expose live text and a run identity");assert.notEqual(firstFrame.runId,secondFrame.runId);
+  assert.ok(liveFrames.every(frame=>!(frame.text.includes("first")&&frame.text.includes("second"))),"Separate runs were merged into one live bubble");
+  queueController.disconnect();
   await store.revokeRemoteCapabilityToken(record.id);
-  await Promise.race([streaming,new Promise((_,reject)=>setTimeout(()=>reject(new Error("Revoked stream stayed open")),5000))]);
+  await Promise.race([Promise.all([streaming,lifecycleStreaming]),new Promise((_,reject)=>setTimeout(()=>reject(new Error("Revoked stream stayed open")),5000))]);
   assert.ok(snapshots.some(event=>event.code==="REMOTE_ACCESS_ENDED"));
-  console.log("PASS: real Next API + plugin transport + synthetic model; notes policy, idempotency, live content, history and revocation. No personal notes or paid models used.");
+  assert.ok(lifecycle.some(event=>event.code==="REMOTE_ACCESS_ENDED"));
+  await writeFile(join(vault,"tool-fixture.md"),"Synthetic tool output.\n"+"x".repeat(2400));
+  const agentToken=await store.createRemoteCapabilityToken({name:"Synthetic tool lifecycle",creationPolicy:{allowedPolicies:["notes","agent"],cwdRoots:[vault]},scopes:record.scopes});
+  const agentClient=new RemoteClient("http://127.0.0.1:"+port,()=>agentToken.token);agentClient.pinServer(identity.serverId);
+  const toolFrames=[];toolController=new SessionController(agentClient,()=>{if(toolController?.state.toolCalls.length)toolFrames.push(structuredClone(toolController.state.toolCalls));});
+  await toolController.connect();await toolController.create({cwd:vault,policy:"agent",provider:"piora-fixture",modelId:"fixture",name:"Synthetic tools"});await toolController.clearCreation();
+  nextToolRequest=true;await toolController.send("Use the two synthetic read calls supplied by the fixture model.");
+  await waitUntil(()=>toolFrames.some(calls=>calls.some(call=>call.status==="succeeded")&&calls.some(call=>call.status==="failed")),"SDK tool outcomes did not reach plugin over content SSE",45000);
+  const terminalTools=toolFrames.find(calls=>calls.some(call=>call.status==="succeeded")&&calls.some(call=>call.status==="failed"));
+  const successfulTool=terminalTools.find(call=>call.status==="succeeded");assert.ok(successfulTool.output.startsWith("Synthetic tool output."));assert.equal(successfulTool.output.length,2000);assert.equal(successfulTool.truncated,true);
+  assert.ok(terminalTools.every(call=>!Object.hasOwn(call,"args")&&!Object.hasOwn(call,"result")));assert.equal(terminalTools.find(call=>call.status==="failed").toolName,"read");
+  releaseToolReply();releaseToolReply=undefined;
+  await waitUntil(()=>toolController.state.control.runtime==="idle"&&toolController.state.history.messages.filter(message=>message.role==="toolResult").length===2,"Tool terminal history did not reconcile",45000);
+  assert.equal(toolController.state.toolCalls.length,0);assert.ok(toolController.state.history.messages.some(message=>message.role==="toolResult"&&message.isError===true));
+  assert.equal(requests.length,5);assert.equal((await agentClient.request("/sessions")).sessions.length,1);
+  const image=prepareAttachment("fixture.png",Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=","base64"));
+  const textAttachment=prepareAttachment("fixture.txt",Buffer.from("synthetic attachment text"));
+  const rejectedImage=await agentClient.request("/sessions/"+toolController.state.selectedId+"/messages",{body:{content:"Text-only models must not silently drop this image",images:[image.image]},key:"text-model-image"});
+  await waitUntil(async()=>{const command=await agentClient.request("/commands/"+rejectedImage.commandId);return command.status==="failed";},"Text-only model image input was not rejected");assert.equal(requests.length,5);toolController.disconnect();
+  let dropMediaReceipt=true;const mediaCommands=[];const savedMediaReceipts=[];
+  const mediaApi={stream:agentClient.stream.bind(agentClient),request:async(path,options)=>{const result=await agentClient.request(path,options);if(path.endsWith("/messages")){mediaCommands.push(result.commandId);if(dropMediaReceipt){dropMediaReceipt=false;throw new Error("dropped image receipt");}}return result;}};
+  mediaController=new SessionController(mediaApi,()=>{},async receipt=>{savedMediaReceipts.push(receipt);});await mediaController.connect();await mediaController.create({cwd:vault,policy:"notes",provider:"piora-fixture",modelId:"fixture-vision",name:"Synthetic attachments"});await mediaController.clearCreation();
+  const payload=attachmentPayload("Read synthetic attachments",[],[image,textAttachment]);await assert.rejects(mediaController.send(payload.content,payload.images),/dropped image receipt/);await mediaController.retry();
+  await waitUntil(()=>mediaController.state.tasks.length===0&&mediaController.state.history.messages.some(message=>message.role==="assistant"),"Attachment message did not reconcile",45000);
+  assert.equal(requests.length,6);assert.deepEqual(mediaCommands,[mediaCommands[0],mediaCommands[0]]);assert.ok(!JSON.stringify(savedMediaReceipts).includes(image.image.data));
+  const visionRequest=requests[5];assert.equal(visionRequest.model,"fixture-vision");assert.ok(!visionRequest.tools?.length);const userContent=visionRequest.messages.find(message=>message.role==="user").content;
+  assert.ok(userContent.some(block=>block.type==="image_url"&&block.image_url.url==="data:image/png;base64,"+image.image.data));assert.ok(userContent.some(block=>block.type==="text"&&block.text.includes("synthetic attachment text")));
+  assert.equal((await agentClient.request("/sessions")).sessions.length,2);
+  console.log("PASS: real Next API + plugin controller + synthetic model; startup lease discovery and anonymous identity with Desktop Token protection active; creation recovery, restrictions, queues, cancellation, tool lifecycle and revocation; typed attachments and same-command retry. Four sessions, six synthetic model requests. No personal notes or paid models used.");
 } finally {
+  releaseModel?.();releaseToolReply?.();queueController?.disconnect();toolController?.disconnect();mediaController?.disconnect();
   abort.abort();modelServer.closeAllConnections();modelServer.close();
   if(child.pid){if(process.platform==="win32")spawnSync("taskkill",["/PID",String(child.pid),"/T","/F"],{windowsHide:true,stdio:"ignore"});else child.kill("SIGTERM");}
 }
