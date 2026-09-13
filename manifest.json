@@ -1,5 +1,5 @@
 {
-  "id": "piora-obsidian", "name": "Piora", "version": "0.1.0", "minAppVersion": "1.11.4",
+  "id": "piora-obsidian", "name": "Piora for Obsidian", "version": "0.1.1", "minAppVersion": "1.11.4",
   "description": "Chat with your local Piora agent and work with notes using explicit context and reviewed changes.",
   "author": "JohnJAS", "isDesktopOnly": true
 }

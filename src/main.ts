@@ -42,11 +42,11 @@ export class ChatView extends ItemView {
   private renderer=new Component();
   private update=()=>this.refresh();
   getViewType(): string { return VIEW; }
-  getDisplayText(): string { return "Piora"; }
+  getDisplayText(): string { return "Piora for Obsidian"; }
   getIcon():string{return "bot";}
   async onOpen(): Promise<void> {
     this.contentEl.replaceChildren();this.contentEl.classList.add("piora-chat");
-    const header=element(this.contentEl,"div",undefined,"piora-toolbar");element(header,"h3","Piora");button(header,"连接",()=>this.plugin.connect());button(header,"设置",()=>this.plugin.openSettings());
+    const header=element(this.contentEl,"div",undefined,"piora-toolbar");element(header,"h3","Piora for Obsidian");button(header,"连接",()=>this.plugin.connect());button(header,"设置",()=>this.plugin.openSettings());
     const navigation=element(this.contentEl,"div",undefined,"piora-toolbar");this.picker=element(navigation,"select");this.picker.setAttribute("aria-label","Piora 会话");this.picker.onchange=()=>{void this.plugin.select(this.picker.value).catch(error=>new Notice(String(error)));};
     button(navigation,"新会话",()=>this.plugin.newSession());
     this.status=element(this.contentEl,"div",undefined,"piora-status");this.status.setAttribute("role","status");
