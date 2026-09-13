@@ -1,0 +1,28 @@
+name: Release
+on:
+  push:
+    tags: ["v*.*.*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --legacy-peer-deps
+      - run: npm run check
+      - run: node scripts/check-version.mjs "${GITHUB_REF_NAME#v}"
+      - run: npm run package
+      - name: Verify package contents
+        shell: bash
+        run: |
+          test "$(find release -maxdepth 1 -type f | wc -l)" -eq 2
+          unzip -Z1 release/*.zip | sort | diff -u <(printf 'main.js\nmanifest.json\nstyles.css\n' | sort) -
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/* --generate-notes --title "Piora for Obsidian $GITHUB_REF_NAME"

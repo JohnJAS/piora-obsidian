@@ -16,6 +16,7 @@
 - [设计方案（中文）](docs/design.zh-CN.md)：架构、接口边界、交互、安全策略和验收标准。
 - [协作约定](AGENTS.md)：TDD、文档同步与完成检查。
 - [变更记录](docs/changes.md)：任务改动、原因和验证记录。
+- [发布流程](docs/release-process.zh-CN.md)：版本号、打包、Tag 和 GitHub Release 操作步骤。
 - [实现与验收状态](docs/acceptance.zh-CN.md)：逐项证据、剩余功能与真实宿主验收步骤。
 - P0：可信环境下的连接与聊天原型。
 - P1：笔记引用、确认写回、服务端受限会话策略。

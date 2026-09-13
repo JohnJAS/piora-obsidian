@@ -2,6 +2,25 @@
 
 按任务记录有意义的修改，最新记录在前。不得将计划执行的验证写成已经通过。
 
+## 2026-09-13：产品发包设计
+
+- 改动：新增 `docs/packaging-design.zh-CN.md`，定义插件 ZIP、哈希、版本、构建脚本、手动安装/升级、社区发布和验收要求。
+- 原因：明确产品化交付边界，避免把服务端、Token 或 Vault 内容混入插件包，并保证升级可回滚。
+- 验证：检查文档结构、命令与现有 `scripts/install.mjs`/`package.json` 的一致性；不适用代码测试。
+- 限制：尚未实现 `scripts/package.mjs`、CI、签名、许可证或社区插件目录发布。
+
+## 2026-09-13：发包方案 review
+
+- 改动：补充发包文档中的 CI/CD、确定性 ZIP、回滚、Release 内容和当前仓库差距审查。
+- 结论：现有 `build.mjs` 和测试 Vault 安装器可作为基础，但正式发包命令、安装事务回滚、CI、许可证和社区目录元数据尚未实现。
+- 验证：检查 `manifest.json`、`scripts/build.mjs`、`scripts/install.mjs`、`package.json` 与文档一致性；不适用代码测试。
+
+## 2026-09-13：CI/CD、版本校验与 MIT 许可证
+
+- 改动：新增 MIT `LICENSE`、`check-version` 脚本、GitHub CI/Release workflows；正式标签会校验 manifest 版本、运行检查、打包、验证 ZIP 内容并创建 Release。
+- 验证：`npm.cmd run check`（16 文件 / 156 项）、`npm.cmd run check-version -- 0.1.0` 均通过；未在 GitHub Actions runner 上实际触发发布。
+- 限制：尚未创建远端版本标签或 Release；社区插件目录、签名和安装器完整回滚仍未完成。
+
 ## 2026-09-13：服务端创建崩溃恢复与压力边界
 
 - 改动：Remote 会话创建改为跨进程创建意图状态机：先落盘受保护的会话身份、JSONL 种子和请求指纹，再初始化 Agent；初始化中、授权前和授权完成后的进程退出均可用原令牌和原幂等键恢复。创建锁按幂等键分离，避免不同会话互相阻塞；同键不同参数、损坏意图/种子和归属冲突均失败关闭。
